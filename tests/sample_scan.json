@@ -1,0 +1,7 @@
+[
+  {"ssid": "Home_2G",   "bssid": "AA:BB:CC:11:22:33", "frequency": 2437, "level": -45, "capabilities": "[WPA2-PSK-CCMP][WPS][ESS]"},
+  {"ssid": "Home_5G",   "bssid": "AA:BB:CC:11:22:44", "frequency": 5180, "level": -70, "capabilities": "[WPA3-SAE-CCMP][ESS]"},
+  {"ssid": "CafeOpen",  "bssid": "AA:BB:CC:11:22:55", "frequency": 2462, "level": -60, "capabilities": "[ESS]"},
+  {"ssid": "LegacyWEP", "bssid": "AA:BB:CC:11:22:66", "frequency": 2412, "level": -80, "capabilities": "[WEP][ESS]"},
+  {"ssid": "PlainWPA2", "bssid": "AA:BB:CC:11:22:77", "frequency": 2412, "level": -40, "capabilities": "[WPA2-PSK-CCMP][ESS]"}
+]

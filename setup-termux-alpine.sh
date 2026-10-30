@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # language: bash, file: setup-termux-alpine.sh
-# RODAR NO TERMUX NATIVO (não dentro do alpine).
-# Instala proot-distro + alpine, liga o termux-api no alpine e cria o wrapper `atw`.
+# RUN THIS IN NATIVE TERMUX (not inside alpine).
+# Installs proot-distro + alpine, exposes termux-api inside alpine, and creates the `atw` wrapper.
 set -e
 
-echo "[*] instalando proot-distro..."
+echo "[*] installing proot-distro..."
 pkg install -y proot-distro
 
-echo "[*] instalando alpine..."
-proot-distro install alpine 2>/dev/null || echo "[=] alpine já instalado"
+echo "[*] installing alpine..."
+proot-distro install alpine 2>/dev/null || echo "[=] alpine already installed"
 
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
-# wrapper: entra no alpine com termux-api acessível via bind, roda o autowifi
+# wrapper: enter alpine with termux-api reachable via bind mounts, then run autowifi
 cat > "$PREFIX/bin/atw" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 exec proot-distro login alpine \\
@@ -29,17 +29,17 @@ chmod +x "$PREFIX/bin/atw"
 
 cat <<'MSG'
 
-[*] pronto. dentro do alpine, uma vez:
+[*] done. inside alpine, once:
       proot-distro login alpine
       apk add --no-cache python3 iw wireless-tools aircrack-ng
       apk add --no-cache git
       git clone https://github.com/SugarUnded/my-wificracker.git /root/my-wificracker
 
-[*] depois, do Termux nativo, rode com:
-      atw                 # detecta + recomenda (usa o scan do termux-api)
-      atw --scan-json ~/scan.json   # scan salvo no Termux nativo
+[*] after that, from native Termux, run with:
+      atw                 # detect + recommend (uses the termux-api scan)
+      atw --scan-json ~/scan.json   # saved scan from native Termux
 
-[*] plano B (termux-api chato dentro do proot):
-      termux-wifi-scaninfo > ~/scan.json     # no TERMUX NATIVO
-      atw --scan-json ~/scan.json            # no ALPINE
+[*] plan B (termux-api is flaky inside proot):
+      termux-wifi-scaninfo > ~/scan.json     # in NATIVE TERMUX
+      atw --scan-json ~/scan.json            # in ALPINE
 MSG

