@@ -7,7 +7,7 @@ e escolhe o caminho de ataque mais rápido por alvo. Inclui um cracker offline
 WPA/WPA2-PSK from-scratch (só stdlib) para handshake e PMKID.
 
 ## Instalar
-    git clone https://github.com/SugarUnded/autowifi.git
+    git clone https://github.com/SugarUnded/my-wificracker.git
     cd autowifi && bash install.sh
 
 ## Usar
