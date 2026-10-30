@@ -15,6 +15,16 @@ WPA/WPA2-PSK from-scratch (só stdlib) para handshake e PMKID.
     python autowifi.py --run      # executa o melhor plano
     python autowifi.py --target <bssid|ssid>
     python autowifi.py --json
+    python autowifi.py --scan-json scan.json   # usa um scan salvo (Termux/Alpine)
+
+## Termux + Alpine (proot)
+    # no Termux nativo:
+    bash setup-termux-alpine.sh
+    # depois: atw   (ou atw --scan-json ~/scan.json)
+    #
+    # plano B se o termux-api não responder dentro do proot:
+    termux-wifi-scaninfo > ~/scan.json      # Termux nativo
+    atw --scan-json ~/scan.json             # Alpine
 
 ## Crack offline
     python wpa_crack.py captura.cap -w rockyou.txt -t 8

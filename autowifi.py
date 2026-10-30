@@ -32,7 +32,10 @@ def run(cmd, use_sudo=False, timeout=None, capture=True):
         return 124, "timeout"
 
 def find_termux_bin(name):
+    tb = os.environ.get("TERMUX_BIN")
     cands = [
+        os.path.join(tb, name) if tb else None,
+        f"/opt/tbin/{name}",
         shutil.which(name),
         f"/data/data/com.termux/files/usr/bin/{name}",
         f"/data/data/com.termux/files/usr/library/bin/{name}",
@@ -103,6 +106,24 @@ def scan(env):
         aps = scan_iw(env)
         if aps: return aps, "iw"
     return [], None
+
+def load_scan_json(path):
+    """Lê um scan salvo (saída do termux-wifi-scaninfo OU do próprio --json).
+    Permite escanear no Termux nativo e rodar classify/plano/crack no Alpine."""
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        data = json.load(f)
+    if isinstance(data, dict) and "aps" in data:
+        data = data["aps"]
+    aps = []
+    for n in data:
+        aps.append({
+            "ssid": n.get("ssid", ""),
+            "bssid": str(n.get("bssid", "")).lower(),
+            "ch": n.get("ch") or freq_to_ch(n.get("frequency", 0)) or 0,
+            "signal": n.get("signal", n.get("level", 0)),
+            "caps": n.get("caps") or n.get("capabilities", ""),
+        })
+    return aps
 
 def scan_termux(env):
     rc, out = run([env["tools"]["termux-wifi-scaninfo"]])
@@ -196,7 +217,7 @@ def plan_for(ap, env):
         return {"score": 2, "method": "handshake + aircrack", "needs_monitor": True, "mon": mon}
     if s == "wep":
         return {"score": 4, "method": "WEP arpreplay (aircrack)", "needs_monitor": True, "mon": mon}
-    return {"score": 0, "method": "rede aberta — conecta direto", "needs_monitor": False, "mon": mon}
+    return {"score": 5, "method": "rede aberta — conecta direto", "needs_monitor": False, "mon": mon}
 
 def rank(aps, env):
     for a in aps:
@@ -325,6 +346,8 @@ def main():
     ap.add_argument("--run", action="store_true", help="executa o melhor plano")
     ap.add_argument("--target", help="força alvo por bssid ou ssid")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--scan-json", metavar="FILE",
+                    help="usa um scan salvo (termux-wifi-scaninfo ou --json) em vez de escanear ao vivo")
     ap.add_argument("--install", action="store_true")
     a = ap.parse_args()
 
@@ -340,7 +363,7 @@ def main():
         if env["monitor_if"] is None:
             print("[!] nenhum adaptador monitor-capable — ataque ao vivo indisponível aqui.")
 
-    aps, backend = scan(env)
+    aps, backend = (load_scan_json(a.scan_json), "json") if a.scan_json else scan(env)
     if not aps:
         print("[!] scan vazio. Termux: instale termux-api + app, dê permissão de localização. "
               "Linux: instale nmcli/iw, ou rode com root.")
