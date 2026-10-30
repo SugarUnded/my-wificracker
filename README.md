@@ -18,6 +18,8 @@ WPA/WPA2-PSK from-scratch (só stdlib) para handshake e PMKID.
     python autowifi.py --scan-json scan.json   # usa um scan salvo (Termux/Alpine)
 
 ## Termux + Alpine (proot)
+**Guia completo passo a passo: [TERMUX.md](TERMUX.md)**
+
     # no Termux nativo:
     bash setup-termux-alpine.sh
     # depois: atw   (ou atw --scan-json ~/scan.json)
