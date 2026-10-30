@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.cap
+*.pcapng
+*.hc22000
+*.22000
+wordlists/
+rockyou.txt*
