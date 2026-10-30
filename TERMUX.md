@@ -150,4 +150,3 @@ hashcat -m 22000 out.22000 rockyou.txt
 
 ---
 
-Uso em rede própria / ambiente autorizado.
