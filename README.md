@@ -38,4 +38,3 @@ WPA/WPA2-PSK from-scratch (só stdlib) para handshake e PMKID.
 - Escaneia sem root via termux-api (requer permissão de localização).
 - WPA3/SAE não cai neste pipeline.
 
-Uso em rede própria / ambiente autorizado.
